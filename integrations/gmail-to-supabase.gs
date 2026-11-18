@@ -46,7 +46,21 @@ function syncDadWorkday() {
     console.log('Newest batch received: '+msg.getDate().toISOString());
     if (props.getProperty('last_batch_id')===msg.getId()) { console.log('Newest batch already processed successfully.'); return; }
     const raw=msg.getPlainBody().trim();
-    const events=JSON.parse(raw);
+    // Extract the first complete JSON array, ignoring appended email disclaimers.
+    if (!raw.startsWith('[')) throw Error('Batch body does not start with a JSON array');
+    let depth=0, quoted=false, escaped=false, endIndex=-1;
+    for(let i=0;i<raw.length;i++){
+      const c=raw[i];
+      if(quoted){
+        if(escaped) escaped=false;
+        else if(c==='\\') escaped=true;
+        else if(c==='"') quoted=false;
+      } else if(c==='"') quoted=true;
+      else if(c==='[') depth++;
+      else if(c===']' && --depth===0){endIndex=i+1;break;}
+    }
+    if(endIndex<0) throw Error('Incomplete batch JSON');
+    const events=JSON.parse(raw.slice(0,endIndex));
     if (!Array.isArray(events)) throw Error('Expected a JSON array');
     const seen=new Set();
     const rows=events.map(e=>{

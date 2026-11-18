@@ -19,11 +19,13 @@ function syncDadWorkday() {
   if (!url || !key || !sender) throw Error('Missing SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY or ALLOWED_SENDER script property');
   const label = GmailApp.getUserLabelByName(LABEL_NAME);
   if (!label) throw Error('Create Gmail label: ' + LABEL_NAME);
-  const processed = GmailApp.getUserLabelByName('DadsWorkdayProcessed') || GmailApp.createLabel('DadsWorkdayProcessed');
-  const threads = GmailApp.search('label:' + LABEL_NAME + ' -label:DadsWorkdayProcessed', 0, 50);
+  // Track each message individually: Gmail can thread multiple updates under one subject.
+  const threads = GmailApp.search('label:' + LABEL_NAME, 0, 50);
   for (const thread of threads.reverse()) {
     try {
       for (const msg of thread.getMessages()) {
+        const doneKey = 'done_' + msg.getId();
+        if (props.getProperty(doneKey)) continue;
         const from = msg.getFrom().toLowerCase();
         const match = from.match(/<([^>]+)>/);
         const address = (match ? match[1] : from).trim();
@@ -62,8 +64,8 @@ function syncDadWorkday() {
         const target = endpoint + (options.method === 'post' ? '' : '?outlook_event_id=eq.' + encodeURIComponent(id));
         const response = UrlFetchApp.fetch(target,options);
         if (response.getResponseCode() >= 300) throw Error('Supabase ' + response.getResponseCode() + ': ' + response.getContentText());
+        props.setProperty(doneKey, '1');
       }
-      thread.addLabel(processed);
     } catch(e) {
       console.error('Thread ' + thread.getId() + ': ' + e.message);
       // Leave unprocessed so it can be retried after fixing the issue.

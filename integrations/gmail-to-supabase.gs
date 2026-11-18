@@ -21,103 +21,53 @@ function parseOutlookUtc(value) {
   return date;
 }
 function syncDadWorkday() {
-  const props = PropertiesService.getScriptProperties();
-  const url = props.getProperty('SUPABASE_URL');
-  const key = props.getProperty('SUPABASE_SERVICE_ROLE_KEY');
-  const sender = (props.getProperty('ALLOWED_SENDER') || '').trim().toLowerCase();
-  if (!url || !key || !sender) throw Error('Missing SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY or ALLOWED_SENDER script property');
-  const label = GmailApp.getUserLabelByName(LABEL_NAME);
-  if (!label) throw Error('Create Gmail label: ' + LABEL_NAME);
-  // Track each message individually: Gmail can thread multiple updates under one subject.
-  const threads = GmailApp.search('label:' + LABEL_NAME, 0, 50);
-  for (const thread of threads.reverse()) {
-    try {
-      for (const msg of thread.getMessages()) {
-        const doneKey = 'done_' + msg.getId();
-        if (props.getProperty(doneKey)) continue;
-        const from = msg.getFrom().toLowerCase();
-        const match = from.match(/<([^>]+)>/);
-        const address = (match ? match[1] : from).trim();
-        if (address !== sender) throw Error('Unexpected sender: ' + address);
-        if (msg.getSubject().trim() !== 'DadsWorkday Calendar Sync') throw Error('Unexpected subject');
-        const body = msg.getPlainBody().replace(/\r/g, '');
-        if (!body.includes('DADSWORKDAY_SYNC_V1')) throw Error('Missing sync marker');
-        const get = name => {
-          const match = body.match(new RegExp('^' + name + ':\\s*(.*)$', 'm'));
-          return match ? match[1].trim() : '';
-        };
-        const id = get('EventID'), action = get('ChangeType').toLowerCase();
-        if (!id || id.length > 1000) throw Error('Missing/invalid event ID');
-        const endpoint = url.replace(/\/$/, '') + '/rest/v1/family_meetings';
-        const headers = {apikey:key,Authorization:'Bearer ' + key};
-        let options;
-        if (/delete|deleted|remove/.test(action)) {
-          options = {method:'delete',headers};
-        } else {
-          const title = get('Title'), start = parseOutlookUtc(get('Start')), end = parseOutlookUtc(get('End'));
-          if (!title || isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) throw Error('Invalid event data');
-          if (end - start > 86400000) throw Error('Event exceeds 24 hours');
-          const payload = {outlook_event_id:id,title:title.slice(0,100),starts_at:start.toISOString(),ends_at:end.toISOString()};
-          // Do not overwrite status on existing meetings; new ones default to yellow.
-          const lookup = UrlFetchApp.fetch(endpoint + '?select=id&outlook_event_id=eq.' + encodeURIComponent(id), {headers,muteHttpExceptions:true});
-          if (lookup.getResponseCode() >= 300) throw Error('Lookup failed: ' + lookup.getResponseCode() + ' ' + lookup.getContentText());
-          const existing = JSON.parse(lookup.getContentText());
-          if (existing.length) {
-            options = {method:'patch',headers:{...headers,'Content-Type':'application/json'},payload:JSON.stringify(payload)};
-          } else {
-            payload.status = 'yellow';
-            options = {method:'post',headers:{...headers,'Content-Type':'application/json'},payload:JSON.stringify(payload)};
-          }
-        }
-        options.muteHttpExceptions = true;
-        const target = endpoint + (options.method === 'post' ? '' : '?outlook_event_id=eq.' + encodeURIComponent(id));
-        const response = UrlFetchApp.fetch(target,options);
-        if (response.getResponseCode() >= 300) throw Error('Supabase ' + response.getResponseCode() + ': ' + response.getContentText());
-        props.setProperty(doneKey, '1');
-      }
-    } catch(e) {
-      console.error('Thread ' + thread.getId() + ': ' + e.message);
-      // Leave unprocessed so it can be retried after fixing the issue.
-    }
-  }
-}
-
-/** One-time correction for already-imported meetings. Preserves status and only
- * updates records that already exist. Run once after replacing the script.
- * Does not alter the processed-message markers or create new meetings.
- */
-function repairImportedTimes() {
-  const props = PropertiesService.getScriptProperties();
-  const url = props.getProperty('SUPABASE_URL');
-  const key = props.getProperty('SUPABASE_SERVICE_ROLE_KEY');
-  const sender = (props.getProperty('ALLOWED_SENDER') || '').trim().toLowerCase();
-  if (!url || !key || !sender) throw Error('Missing script properties');
-  const endpoint = url.replace(/\/$/, '') + '/rest/v1/family_meetings';
-  const headers = {apikey:key,Authorization:'Bearer ' + key};
-  let fixed=0, skipped=0;
-  const threads = GmailApp.search('label:' + LABEL_NAME, 0, 500);
-  // Oldest first so the latest change for a given event wins.
-  const messages = threads.flatMap(t => t.getMessages()).sort((a,b)=>a.getDate()-b.getDate());
-  for (const msg of messages) {
-    const from = msg.getFrom().toLowerCase();
-    const match = from.match(/<([^>]+)>/);
-    if ((match ? match[1] : from).trim() !== sender || msg.getSubject().trim() !== 'DadsWorkday Calendar Sync') continue;
-    const body=msg.getPlainBody().replace(/\r/g,'');
-    if (!body.includes('DADSWORKDAY_SYNC_V1')) continue;
-    const get = name => { const m = body.match(new RegExp('^' + name + ':\\s*(.*)$', 'm')); return m ? m[1].trim() : ''; };
-    const id=get('EventID');
-    if (!id || /delete|remove/i.test(get('ChangeType'))) continue;
-    try {
-      const start=parseOutlookUtc(get('Start')),end=parseOutlookUtc(get('End'));
-      if(end<=start || end-start>86400000) throw Error('Invalid meeting duration');
-      const payload={starts_at:start.toISOString(),ends_at:end.toISOString()};
-      const response=UrlFetchApp.fetch(endpoint+'?outlook_event_id=eq.'+encodeURIComponent(id),{
-        method:'patch',headers:{...headers,'Content-Type':'application/json','Prefer':'return=representation'},
-        payload:JSON.stringify(payload),muteHttpExceptions:true
-      });
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const url = props.getProperty('SUPABASE_URL');
+    const key = props.getProperty('SUPABASE_SERVICE_ROLE_KEY');
+    const sender = (props.getProperty('ALLOWED_SENDER') || '').trim().toLowerCase();
+    if (!url || !key || !sender) throw Error('Missing script properties');
+    const endpoint = url.replace(/\/$/, '') + '/rest/v1/family_meetings';
+    const headers = {apikey:key,Authorization:'Bearer '+key,'Content-Type':'application/json'};
+    const messages = GmailApp.search('label:DadsWorkday subject:"DadsWorkday Calendar Batch" newer_than:7d',0,50)
+      .flatMap(t=>t.getMessages()).filter(m=>{
+        const from=m.getFrom().toLowerCase(), match=from.match(/<([^>]+)>/);
+        return (match?match[1]:from).trim()===sender && m.getSubject().trim()==='DadsWorkday Calendar Batch';
+      }).sort((a,b)=>b.getDate()-a.getDate());
+    const msg=messages[0];
+    if (!msg || props.getProperty('last_batch_id')===msg.getId()) return;
+    const raw=msg.getPlainBody().trim();
+    const events=JSON.parse(raw);
+    if (!Array.isArray(events)) throw Error('Expected a JSON array');
+    const seen=new Set();
+    const rows=events.map(e=>{
+      const id=String(e.eventID||'').trim();
+      const start=parseOutlookUtc(e.start),end=parseOutlookUtc(e.end);
+      if(!id || id.length>1000 || seen.has(id) || end<=start) throw Error('Invalid or duplicate event');
+      seen.add(id);
+      return {outlook_event_id:id,title:String(e.title||'Untitled meeting').slice(0,100),starts_at:start.toISOString(),ends_at:end.toISOString()};
+    });
+    function request(target,options){
+      const response=UrlFetchApp.fetch(target,{headers,muteHttpExceptions:true,...options});
       if(response.getResponseCode()>=300) throw Error('Supabase '+response.getResponseCode()+': '+response.getContentText());
-      fixed+=JSON.parse(response.getContentText()).length;
-    } catch(e) { skipped++;console.error('Repair failed for message '+msg.getId()+': '+e.message) }
-  }
-  console.log('Updated '+fixed+' meeting record(s); skipped '+skipped+' message(s) with errors.');
+      return response.getContentText();
+    }
+    let changed=0;
+    for(const row of rows){
+      const target=endpoint+'?outlook_event_id=eq.'+encodeURIComponent(row.outlook_event_id);
+      const existing=JSON.parse(request(target+'&select=id,title,starts_at,ends_at',{}))[0];
+      if(existing){
+        if(existing.title===row.title && new Date(existing.starts_at).getTime()===new Date(row.starts_at).getTime() && new Date(existing.ends_at).getTime()===new Date(row.ends_at).getTime()) continue;
+        request(target,{method:'patch',payload:JSON.stringify(row)});
+      } else {
+        request(endpoint,{method:'post',payload:JSON.stringify({...row,status:'yellow'})});
+      }
+      changed++;
+    }
+    // Do not delete absent events until snapshot boundaries and pagination are verified.
+    props.setProperty('last_batch_id',msg.getId());
+    console.log('Batch received: '+rows.length+' meetings; '+changed+' added or updated. No deletions.');
+  } finally {lock.releaseLock();}
 }

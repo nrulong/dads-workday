@@ -11,6 +11,15 @@ function setupTrigger() {
   ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'syncDadWorkday').forEach(ScriptApp.deleteTrigger);
   ScriptApp.newTrigger('syncDadWorkday').timeBased().everyMinutes(5).create();
 }
+function parseOutlookUtc(value) {
+  const raw = String(value || '').trim();
+  // Outlook sends UTC timestamps without a timezone suffix (e.g. 2026-11-20T14:00:00.0000000).
+  // Treat those as UTC; preserve timestamps already carrying Z or an offset.
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw) ? raw : raw + 'Z';
+  const date = new Date(normalized);
+  if (isNaN(date.getTime())) throw Error('Invalid Outlook UTC timestamp: ' + raw);
+  return date;
+}
 function syncDadWorkday() {
   const props = PropertiesService.getScriptProperties();
   const url = props.getProperty('SUPABASE_URL');
@@ -45,7 +54,7 @@ function syncDadWorkday() {
         if (/delete|deleted|remove/.test(action)) {
           options = {method:'delete',headers};
         } else {
-          const title = get('Title'), start = new Date(get('Start')), end = new Date(get('End'));
+          const title = get('Title'), start = parseOutlookUtc(get('Start')), end = parseOutlookUtc(get('End'));
           if (!title || isNaN(start.getTime()) || isNaN(end.getTime()) || end <= start) throw Error('Invalid event data');
           if (end - start > 86400000) throw Error('Event exceeds 24 hours');
           const payload = {outlook_event_id:id,title:title.slice(0,100),starts_at:start.toISOString(),ends_at:end.toISOString()};
@@ -71,4 +80,44 @@ function syncDadWorkday() {
       // Leave unprocessed so it can be retried after fixing the issue.
     }
   }
+}
+
+/** One-time correction for already-imported meetings. Preserves status and only
+ * updates records that already exist. Run once after replacing the script.
+ * Does not alter the processed-message markers or create new meetings.
+ */
+function repairImportedTimes() {
+  const props = PropertiesService.getScriptProperties();
+  const url = props.getProperty('SUPABASE_URL');
+  const key = props.getProperty('SUPABASE_SERVICE_ROLE_KEY');
+  const sender = (props.getProperty('ALLOWED_SENDER') || '').trim().toLowerCase();
+  if (!url || !key || !sender) throw Error('Missing script properties');
+  const endpoint = url.replace(/\\/$/, '') + '/rest/v1/family_meetings';
+  const headers = {apikey:key,Authorization:'Bearer ' + key};
+  let fixed=0, skipped=0;
+  const threads = GmailApp.search('label:' + LABEL_NAME, 0, 500);
+  // Oldest first so the latest change for a given event wins.
+  const messages = threads.flatMap(t => t.getMessages()).sort((a,b)=>a.getDate()-b.getDate());
+  for (const msg of messages) {
+    const from = msg.getFrom().toLowerCase();
+    const match = from.match(/<([^>]+)>/);
+    if ((match ? match[1] : from).trim() !== sender || msg.getSubject().trim() !== 'DadsWorkday Calendar Sync') continue;
+    const body=msg.getPlainBody().replace(/\\r/g,'');
+    if (!body.includes('DADSWORKDAY_SYNC_V1')) continue;
+    const get=name=>{const m=body.match(new RegExp('^'+name+':\\\\s*(.*)$','m'));return m?m[1].trim():''};
+    const id=get('EventID');
+    if (!id || /delete|remove/i.test(get('ChangeType'))) continue;
+    try {
+      const start=parseOutlookUtc(get('Start')),end=parseOutlookUtc(get('End'));
+      if(end<=start || end-start>86400000) throw Error('Invalid meeting duration');
+      const payload={starts_at:start.toISOString(),ends_at:end.toISOString()};
+      const response=UrlFetchApp.fetch(endpoint+'?outlook_event_id=eq.'+encodeURIComponent(id),{
+        method:'patch',headers:{...headers,'Content-Type':'application/json','Prefer':'return=representation'},
+        payload:JSON.stringify(payload),muteHttpExceptions:true
+      });
+      if(response.getResponseCode()>=300) throw Error('Supabase '+response.getResponseCode()+': '+response.getContentText());
+      fixed+=JSON.parse(response.getContentText()).length;
+    } catch(e) { skipped++;console.error('Repair failed for message '+msg.getId()+': '+e.message) }
+  }
+  console.log('Updated '+fixed+' meeting record(s); skipped '+skipped+' message(s) with errors.');
 }

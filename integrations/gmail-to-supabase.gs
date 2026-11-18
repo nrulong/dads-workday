@@ -92,7 +92,7 @@ function repairImportedTimes() {
   const key = props.getProperty('SUPABASE_SERVICE_ROLE_KEY');
   const sender = (props.getProperty('ALLOWED_SENDER') || '').trim().toLowerCase();
   if (!url || !key || !sender) throw Error('Missing script properties');
-  const endpoint = url.replace(/\\/$/, '') + '/rest/v1/family_meetings';
+  const endpoint = url.replace(/\/$/, '') + '/rest/v1/family_meetings';
   const headers = {apikey:key,Authorization:'Bearer ' + key};
   let fixed=0, skipped=0;
   const threads = GmailApp.search('label:' + LABEL_NAME, 0, 500);
@@ -102,9 +102,26 @@ function repairImportedTimes() {
     const from = msg.getFrom().toLowerCase();
     const match = from.match(/<([^>]+)>/);
     if ((match ? match[1] : from).trim() !== sender || msg.getSubject().trim() !== 'DadsWorkday Calendar Sync') continue;
-    const body=msg.getPlainBody().replace(/\\r/g,'');
+    const body=msg.getPlainBody().replace(/\r/g,'');
     if (!body.includes('DADSWORKDAY_SYNC_V1')) continue;
-    const get=name=>{const m=body.match(new RegExp('^'+name+':\\\\s*(.*)$','m'));return m?m[1].trim():''};
+    const get=name=>{const m=body.match(new RegExp('^'+name+':\\s*(.*),'m'));return m?m[1].trim():''};
+    const id=get('EventID');
+    if (!id || /delete|remove/i.test(get('ChangeType'))) continue;
+    try {
+      const start=parseOutlookUtc(get('Start')),end=parseOutlookUtc(get('End'));
+      if(end<=start || end-start>86400000) throw Error('Invalid meeting duration');
+      const payload={starts_at:start.toISOString(),ends_at:end.toISOString()};
+      const response=UrlFetchApp.fetch(endpoint+'?outlook_event_id=eq.'+encodeURIComponent(id),{
+        method:'patch',headers:{...headers,'Content-Type':'application/json','Prefer':'return=representation'},
+        payload:JSON.stringify(payload),muteHttpExceptions:true
+      });
+      if(response.getResponseCode()>=300) throw Error('Supabase '+response.getResponseCode()+': '+response.getContentText());
+      fixed+=JSON.parse(response.getContentText()).length;
+    } catch(e) { skipped++;console.error('Repair failed for message '+msg.getId()+': '+e.message) }
+  }
+  console.log('Updated '+fixed+' meeting record(s); skipped '+skipped+' message(s) with errors.');
+}
+,'m'));return m?m[1].trim():''};
     const id=get('EventID');
     if (!id || /delete|remove/i.test(get('ChangeType'))) continue;
     try {

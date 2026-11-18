@@ -104,7 +104,7 @@ function repairImportedTimes() {
     if ((match ? match[1] : from).trim() !== sender || msg.getSubject().trim() !== 'DadsWorkday Calendar Sync') continue;
     const body=msg.getPlainBody().replace(/\r/g,'');
     if (!body.includes('DADSWORKDAY_SYNC_V1')) continue;
-    const get = name => { const m = body.match(new RegExp('^' + name + ':\\s*(.*)
+    const get = name => { const m = body.match(new RegExp('^' + name + ':\\s*(.*)$', 'm')); return m ? m[1].trim() : ''; };
     const id=get('EventID');
     if (!id || /delete|remove/i.test(get('ChangeType'))) continue;
     try {

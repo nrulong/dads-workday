@@ -22,7 +22,7 @@ function parseOutlookUtc(value) {
 }
 function syncDadWorkday() {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(1000)) return;
+  if (!lock.tryLock(1000)) { console.log('Another sync is running.'); return; }
   try {
     const props = PropertiesService.getScriptProperties();
     const url = props.getProperty('SUPABASE_URL');
@@ -31,13 +31,20 @@ function syncDadWorkday() {
     if (!url || !key || !sender) throw Error('Missing script properties');
     const endpoint = url.replace(/\/$/, '') + '/rest/v1/family_meetings';
     const headers = {apikey:key,Authorization:'Bearer '+key,'Content-Type':'application/json'};
-    const messages = GmailApp.search('label:DadsWorkday subject:"DadsWorkday Calendar Batch" newer_than:7d',0,50)
-      .flatMap(t=>t.getMessages()).filter(m=>{
+    const threads = GmailApp.search('label:DadsWorkday subject:"DadsWorkday Calendar Batch" newer_than:7d',0,50);
+    console.log('Matching Gmail threads: '+threads.length);
+    const messages = threads.flatMap(t=>t.getMessages()).filter(m=>{
         const from=m.getFrom().toLowerCase(), match=from.match(/<([^>]+)>/);
-        return (match?match[1]:from).trim()===sender && m.getSubject().trim()==='DadsWorkday Calendar Batch';
+        const senderMatches=(match?match[1]:from).trim()===sender;
+        const subjectMatches=m.getSubject().trim()==='DadsWorkday Calendar Batch';
+        if(subjectMatches && !senderMatches) console.log('Batch rejected: sender does not match ALLOWED_SENDER.');
+        return senderMatches && subjectMatches;
       }).sort((a,b)=>b.getDate()-a.getDate());
     const msg=messages[0];
-    if (!msg || props.getProperty('last_batch_id')===msg.getId()) return;
+    console.log('Eligible batch messages: '+messages.length);
+    if (!msg) { console.log('No eligible batch found.'); return; }
+    console.log('Newest batch received: '+msg.getDate().toISOString());
+    if (props.getProperty('last_batch_id')===msg.getId()) { console.log('Newest batch already processed successfully.'); return; }
     const raw=msg.getPlainBody().trim();
     const events=JSON.parse(raw);
     if (!Array.isArray(events)) throw Error('Expected a JSON array');

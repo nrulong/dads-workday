@@ -66,7 +66,9 @@ function syncDadWorkday() {
     const rows=events.map(e=>{
       const id=String(e.eventID||'').trim();
       const start=parseOutlookUtc(e.start),end=parseOutlookUtc(e.end);
-      if(!id || id.length>1000 || seen.has(id) || end<=start) throw Error('Invalid or duplicate event');
+      if(!id || id.length>1000) throw Error('Invalid event ID at batch entry '+(seen.size+1)+'; check Select eventID mapping');
+      if(end<=start) throw Error('Invalid meeting duration at batch entry '+(seen.size+1)+': '+start.toISOString()+' to '+end.toISOString());
+      if(seen.has(id)) throw Error('Duplicate event ID at batch entry '+(seen.size+1)+'; check recurring events and Select eventID mapping');
       seen.add(id);
       return {outlook_event_id:id,title:String(e.title||'Untitled meeting').slice(0,100),starts_at:start.toISOString(),ends_at:end.toISOString()};
     });
